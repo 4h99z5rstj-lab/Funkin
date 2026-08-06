@@ -1,0 +1,114 @@
+name: Build FNF iOS IPA
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+jobs:
+  build-ios:
+    runs-on: macos-14
+    timeout-minutes: 120
+    env:
+      NEKOPATH: /opt/homebrew/lib/neko
+      HAXE_STD_PATH: /opt/homebrew/lib/haxe/std
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: false
+
+      - name: Install Haxe and Neko via Homebrew
+        run: |
+          brew install neko
+          brew install haxe
+          echo "NEKOPATH=/opt/homebrew/lib/neko" >> $GITHUB_ENV
+          echo "HAXE_STD_PATH=/opt/homebrew/lib/haxe/std" >> $GITHUB_ENV
+          haxe --version
+          mkdir -p ~/haxelib
+          haxelib setup ~/haxelib
+      - name: Install hmm
+        run: |
+          haxelib --global install hmm --quiet
+          haxelib --global run hmm setup
+      - name: Install Haxe dependencies
+        run: haxelib run hmm install --quiet
+        timeout-minutes: 30
+      - name: Build hxcpp tool
+        run: |
+          HXCPP_PATH=$(haxelib path hxcpp 2>/dev/null | head -1)
+          echo "hxcpp at: $HXCPP_PATH"
+          cd "$HXCPP_PATH/tools/hxcpp"
+          haxe compile.hxml
+          echo "hxcpp tool built successfully"
+      - name: Install xcodeproj gem
+        run: sudo gem install xcodeproj --no-document
+      - name: Patch project.hxp to disable code signing
+        run: |
+          sed -i '' 's/config.set("ios.team-id", IOS_TEAM_ID);/config.set("ios.team-id", "NONE");/' project.hxp
+          grep -n "team-id" project.hxp
+      - name: List Xcode version
+        run: xcodebuild -version
+      - name: Build for iOS (lime build, may fail at xcodebuild)
+        continue-on-error: true
+        env:
+          CODE_SIGNING_ALLOWED: NO
+          CODE_SIGNING_REQUIRED: NO
+          CODE_SIGN_IDENTITY: ""
+          DEVELOPMENT_TEAM: ""
+        run: haxelib run lime build ios -release -D nosign --times
+        timeout-minutes: 90
+      - name: Fix pbxproj format with xcodeproj gem
+        if: always()
+        run: |
+          if [ ! -d export/release/ios ]; then
+            echo "ERROR: export/release/ios directory does not exist"
+            exit 0
+          fi
+          cd export/release/ios
+          echo "=== Original pbxproj first line ==="
+          head -1 Funkin.xcodeproj/project.pbxproj
+          echo "=== plutil lint (before fix) ==="
+          plutil -lint Funkin.xcodeproj/project.pbxproj 2>&1 || true
+          echo "=== Fixing empty values in pbxproj ==="
+          sed -i '' 's/DevelopmentTeam = ;/DevelopmentTeam = "NONE";/g' Funkin.xcodeproj/project.pbxproj
+          sed -i '' 's/CODE_SIGN_IDENTITY = ;/CODE_SIGN_IDENTITY = "";/g' Funkin.xcodeproj/project.pbxproj
+          echo "=== Fixing pbxproj with Ruby xcodeproj gem ==="
+          ruby -e '
+            require "xcodeproj"
+            project_path = "Funkin.xcodeproj"
+            project = Xcodeproj::Project.open(project_path)
+            project.save
+            puts "Project re-saved successfully"
+          '
+          echo "=== pbxproj first line after fix ==="
+          head -1 Funkin.xcodeproj/project.pbxproj
+          echo "=== plutil lint (after fix) ==="
+          plutil -lint Funkin.xcodeproj/project.pbxproj 2>&1 || true
+          echo "=== xcodebuild -list ==="
+          xcodebuild -list -project Funkin.xcodeproj 2>&1 || true
+      - name: Manual xcodebuild
+        run: |
+          if [ ! -d export/release/ios ]; then
+            echo "ERROR: No export directory"
+            exit 1
+          fi
+          cd export/release/ios
+          xcodebuild -configuration Release -project Funkin.xcodeproj -sdk iphoneos build CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" DEVELOPMENT_TEAM="" PROVISIONING_PROFILE_SPECIFIER="" 2>&1
+      - name: Package IPA
+        run: |
+          APP_PATH=$(find export/release/ios/build -name "*.app" -type d 2>/dev/null | head -1)
+          if [ -z "$APP_PATH" ]; then
+            echo "ERROR: No .app found"
+            find export/release/ios -name "*.app" -type d 2>/dev/null || true
+            ls -laR export/release/ios/build/ 2>/dev/null | head -80 || true
+            exit 1
+          fi
+          echo "Found: $APP_PATH"
+          mkdir -p Payload && cp -r "$APP_PATH" Payload/
+          zip -r FNF_iOS.ipa Payload
+          ls -lh FNF_iOS.ipa
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FNF-iOS
+          path: FNF_iOS.ipa
+          retention-days: 7
