@@ -8,7 +8,7 @@ on:
 jobs:
   build-ios:
     runs-on: macos-14
-    timeout-minutes: 90
+    timeout-minutes: 120
     env:
       NEKOPATH: /opt/homebrew/lib/neko
       HAXE_STD_PATH: /opt/homebrew/lib/haxe/std
@@ -29,17 +29,22 @@ jobs:
         uses: actions/cache@v3
         with:
           path: ~/haxelib
-          key: fnf-haxe-v1-${{ hashFiles('hmm.json') }}
+          key: fnf-haxe-v2-${{ hashFiles('hmm.json') }}
       - name: Install hmm
         run: |
           haxelib --global install hmm --quiet
           haxelib --global run hmm setup
-      - name: Pre-fix hmm.json mirror switch ghp.ci
+      - name: Pre-download git deps native git
         run: |
-          sed -i '' 's|https://github.com/|https://ghp.ci/https://github.com/|g' hmm.json
+          mkdir -p vendor
+          git clone https://github.com/FunkinCrew/FlxPartialSound.git vendor/FlxPartialSound
+          cd vendor/FlxPartialSound
+          git reset --hard 2f984e244f1544ca98c0e03b9b21ae570f07ac55
+          cd ../..
+          sed -i '' 's|"FlxPartialSound": "git:.*"|"FlxPartialSound": "path:vendor/FlxPartialSound"|g' hmm.json
       - name: Install Haxe dependencies
         run: haxelib run hmm install --quiet
-        timeout-minutes: 10
+        timeout-minutes: 15
       - name: Build hxcpp tool
         run: |
           HXCPP_PATH=$(haxelib path hxcpp | head -1)
