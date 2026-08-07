@@ -8,121 +8,74 @@ on:
 jobs:
   build-ios:
     runs-on: macos-14
-    timeout-minutes: 120
+    timeout-minutes: 90
     env:
       NEKOPATH: /opt/homebrew/lib/neko
       HAXE_STD_PATH: /opt/homebrew/lib/haxe/std
+      HAXELIB_ROOT: ~/haxelib
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 1
           submodules: false
-
-      - name: Install Haxe and Neko via Homebrew
+      - name: Install Haxe & Neko
         run: |
-          brew install neko
-          brew install haxe
+          brew install neko haxe
           echo "NEKOPATH=/opt/homebrew/lib/neko" >> $GITHUB_ENV
           echo "HAXE_STD_PATH=/opt/homebrew/lib/haxe/std" >> $GITHUB_ENV
-          haxe --version
-          mkdir -p ~/haxelib
-          haxelib setup ~/haxelib
-
+          mkdir -p $HAXELIB_ROOT
+          haxelib setup $HAXELIB_ROOT
+      - name: Cache Haxelib
+        uses: actions/cache@v3
+        with:
+          path: ~/haxelib
+          key: fnf-haxe-v1-${{ hashFiles('hmm.json') }}
       - name: Install hmm
         run: |
           haxelib --global install hmm --quiet
           haxelib --global run hmm setup
-
-      - name: Install Haxe dependencies（添加GH代理修复克隆失败）
+      - name: Pre-fix hmm.json mirror
         run: |
-          # 全局替换GitHub地址为加速镜像，解决unable to read tree
-          git config --global url."https://mirror.ghproxy.com/https://github.com/".insteadOf "https://github.com/"
-          haxelib run hmm install --quiet
-        timeout-minutes: 30
-
+          sed -i '' 's|https://github.com/|https://mirror.ghproxy.com/https://github.com/|g' hmm.json
+      - name: Install Haxe dependencies
+        run: haxelib run hmm install --quiet
+        timeout-minutes: 10
       - name: Build hxcpp tool
         run: |
-          HXCPP_PATH=$(haxelib path hxcpp 2>/dev/null | head -1)
-          echo "hxcpp at: $HXCPP_PATH"
+          HXCPP_PATH=$(haxelib path hxcpp | head -1)
           cd "$HXCPP_PATH/tools/hxcpp"
           haxe compile.hxml
-          echo "hxcpp tool built successfully"
-
       - name: Install xcodeproj gem
         run: sudo gem install xcodeproj --no-document
-
-      - name: Patch project.hxp to disable code signing
-        run: |
-          sed -i '' 's/config.set("ios.team-id", IOS_TEAM_ID);/config.set("ios.team-id", "NONE");/' project.hxp
-          grep -n "team-id" project.hxp
-
+      - name: Patch project.hxp signing
+        run: sed -i '' 's/config.set("ios.team-id", IOS_TEAM_ID);/config.set("ios.team-id", "NONE");/' project.hxp
       - name: List Xcode version
         run: xcodebuild -version
-
-      - name: Build for iOS (lime build, may fail at xcodebuild)
+      - name: Lime build iOS project
         continue-on-error: true
         env:
           CODE_SIGNING_ALLOWED: NO
           CODE_SIGNING_REQUIRED: NO
-          CODE_SIGN_IDENTITY: ""
-          DEVELOPMENT_TEAM: ""
-        run: haxelib run lime build ios -release -D nosign --times
-        timeout-minutes: 90
-
-      - name: Fix pbxproj format with xcodeproj gem
+        run: haxelib run lime build ios -release -D nosign
+        timeout-minutes: 60
+      - name: Fix pbxproj
         if: always()
         run: |
-          if [ ! -d export/release/ios ]; then
-            echo "ERROR: export/release/ios directory does not exist"
-            exit 0
-          fi
+          if [ ! -d export/release/ios ]; then exit 0; fi
           cd export/release/ios
-          echo "=== Original pbxproj first line ==="
-          head -1 Funkin.xcodeproj/project.pbxproj
-          echo "=== plutil lint (before fix) ==="
-          plutil -lint Funkin.xcodeproj/project.pbxproj 2>&1 || true
-          echo "=== Fixing empty values in pbxproj ==="
           sed -i '' 's/DevelopmentTeam = ;/DevelopmentTeam = "NONE";/g' Funkin.xcodeproj/project.pbxproj
-          sed -i '' 's/CODE_SIGN_IDENTITY = ;/CODE_SIGN_IDENTITY = "";/g' Funkin.xcodeproj/project.pbxproj
-          echo "=== Fixing pbxproj with Ruby xcodeproj gem ==="
-          ruby -e '
-            require "xcodeproj"
-            project_path = "Funkin.xcodeproj"
-            project = Xcodeproj::Project.open(project_path)
-            project.save
-            puts "Project re-saved successfully"
-          '
-          echo "=== pbxproj first line after fix ==="
-          head -1 Funkin.xcodeproj/project.pbxproj
-          echo "=== plutil lint (after fix) ==="
-          plutil -lint Funkin.xcodeproj/project.pbxproj 2>&1 || true
-          echo "=== xcodebuild -list ==="
-          xcodebuild -list -project Funkin.xcodeproj 2>&1 || true
-
-      - name: Manual xcodebuild
+          ruby -e 'require "xcodeproj";Xcodeproj::Project.open("Funkin.xcodeproj").save'
+      - name: Xcode compile
         run: |
-          if [ ! -d export/release/ios ]; then
-            echo "ERROR: No export directory"
-            exit 1
-          fi
+          if [ ! -d export/release/ios ]; then exit 1; fi
           cd export/release/ios
-          xcodebuild -configuration Release -project Funkin.xcodeproj -sdk iphoneos build CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" DEVELOPMENT_TEAM="" PROVISIONING_PROFILE_SPECIFIER="" 2>&1
-
+          xcodebuild -configuration Release -project Funkin.xcodeproj -sdk iphoneos build CODE_SIGNING_ALLOWED=NO
       - name: Package IPA
         run: |
-          APP_PATH=$(find export/release/ios/build -name "*.app" -type d 2>/dev/null | head -1)
-          if [ -z "$APP_PATH" ]; then
-            echo "ERROR: No .app found"
-            find export/release/ios -name "*.app" -type d 2>/dev/null || true
-            ls -laR export/release/ios/build/ 2>/dev/null | head -80 || true
-            exit 1
-          fi
-          echo "Found: $APP_PATH"
-          mkdir -p Payload && cp -r "$APP_PATH" Payload/
-          zip -r FNF_iOS.ipa Payload
-          ls -lh FNF_iOS.ipa
-
-      - name: Upload IPA Artifact
+          APP=$(find export/release/ios/build -name "*.app" | head -1)
+          mkdir Payload && cp -r "$APP" Payload/
+          zip -q FNF_iOS.ipa Payload
+      - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
           name: FNF-iOS
